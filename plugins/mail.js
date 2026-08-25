@@ -1,11 +1,11 @@
 // plugins/mail.js
-// Deux fournisseurs : mail.tm en priorité, repli automatique sur 1secmail.com
-// si mail.tm échoue (leur API 500/plante parfois depuis des IP d'hébergeurs cloud).
+// Deux fournisseurs : temp-mail44 en priorité, repli automatique sur temporary-gmail
 import axios from 'axios';
 import { redis } from '../lib/redis.js';
 
-const MAILTM_BASE = 'https://api.mail.tm';
-const SECMAIL_BASE = 'https://www.1secmail.com/api/v1/';
+const RAPID_KEY      = '25222978fdmshe6b4366767fb8e6p18086bjsnee54a88ff976';
+const TEMPMAIL44_HOST = 'temp-mail44.p.rapidapi.com';
+const GMAIL_HOST      = 'temporary-gmail-account.p.rapidapi.com';
 
 function sessionKey(userId) { return `mail:${userId}`; }
 
@@ -31,63 +31,133 @@ function extractMainCode(text) {
     return null;
 }
 
-// ── mail.tm ──────────────────────────────────────────────────────────────────
-async function createMailTm() {
-    const domainRes = await axios.get(`${MAILTM_BASE}/domains`, { timeout: 10000 });
-    const domain = domainRes.data['hydra:member']?.[0]?.domain;
-    if (!domain) throw new Error('mail.tm : aucun domaine disponible');
-    const randomName = Math.random().toString(36).substring(2, 12);
-    const email = `${randomName}@${domain}`;
-    const password = Math.random().toString(36).substring(2, 15);
-    const res = await axios.post(`${MAILTM_BASE}/accounts`, { address: email, password }, { timeout: 10000 });
-    if (!res.data?.id) throw new Error('mail.tm : création échouée');
-    const tokenRes = await axios.post(`${MAILTM_BASE}/token`, { address: email, password }, { timeout: 10000 });
-    return { provider: 'mailtm', email, password, token: tokenRes.data.token, createdAt: Date.now() };
+// ── temp-mail44 ───────────────────────────────────────────────────────────────
+async function createTempMail44() {
+    const res = await axios.post(
+        `https://${TEMPMAIL44_HOST}/api/v3/email/new`,
+        {},
+        {
+            headers: {
+                'Content-Type': 'application/json',
+                'x-rapidapi-host': TEMPMAIL44_HOST,
+                'x-rapidapi-key': RAPID_KEY
+            },
+            timeout: 15000
+        }
+    );
+    const email = res.data?.email || res.data?.data?.email;
+    const token = res.data?.token || res.data?.data?.token || email;
+    if (!email) throw new Error('temp-mail44 : création échouée');
+    return { provider: 'tempmail44', email, token, createdAt: Date.now() };
 }
-async function getMessagesMailTm(s) {
-    const res = await axios.get(`${MAILTM_BASE}/messages`, { headers: { Authorization: `Bearer ${s.token}` }, timeout: 10000 });
-    const messages = res.data['hydra:member'] || [];
-    messages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-    return messages.map(m => ({ id: m.id, from: m.from?.address, subject: m.subject }));
+
+async function getMessagesTempMail44(s) {
+    const res = await axios.get(
+        `https://${TEMPMAIL44_HOST}/api/v3/email/${s.token}/messages`,
+        {
+            headers: {
+                'x-rapidapi-host': TEMPMAIL44_HOST,
+                'x-rapidapi-key': RAPID_KEY
+            },
+            timeout: 15000
+        }
+    );
+    const msgs = res.data?.data || res.data || [];
+    msgs.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    return msgs.map(m => ({
+        id:      m.id || m._id,
+        from:    m.from?.address || m.from || m.sender,
+        subject: m.subject || m.title || 'Sans objet'
+    }));
 }
-async function getMessageContentMailTm(s, id) {
-    const res = await axios.get(`${MAILTM_BASE}/messages/${id}`, { headers: { Authorization: `Bearer ${s.token}` }, timeout: 10000 });
-    let content = res.data.text || res.data.html || '';
+
+async function getMessageContentTempMail44(s, id) {
+    const res = await axios.get(
+        `https://${TEMPMAIL44_HOST}/api/v3/email/${s.token}/messages/${id}`,
+        {
+            headers: {
+                'x-rapidapi-host': TEMPMAIL44_HOST,
+                'x-rapidapi-key': RAPID_KEY
+            },
+            timeout: 15000
+        }
+    );
+    const data = res.data?.data || res.data;
+    let content = data?.body || data?.text || data?.html || data?.content || '';
     if (Array.isArray(content)) content = content[0];
-    return { from: res.data.from?.address, subject: res.data.subject, content };
+    content = content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    return {
+        from:    data?.from?.address || data?.from || data?.sender || 'Inconnu',
+        subject: data?.subject || data?.title || 'Sans objet',
+        content
+    };
 }
 
-// ── 1secmail (repli) ─────────────────────────────────────────────────────────
-async function createSecmail() {
-    const res = await axios.get(SECMAIL_BASE, { params: { action: 'genRandomMailbox', count: 1 }, timeout: 10000 });
-    const email = res.data?.[0];
-    if (!email) throw new Error('1secmail : création échouée');
-    const [login, domain] = email.split('@');
-    return { provider: 'secmail', email, login, domain, createdAt: Date.now() };
-}
-async function getMessagesSecmail(s) {
-    const res = await axios.get(SECMAIL_BASE, { params: { action: 'getMessages', login: s.login, domain: s.domain }, timeout: 10000 });
-    return (res.data || []).map(m => ({ id: m.id, from: m.from, subject: m.subject }));
-}
-async function getMessageContentSecmail(s, id) {
-    const res = await axios.get(SECMAIL_BASE, { params: { action: 'readMessage', login: s.login, domain: s.domain, id }, timeout: 10000 });
-    return { from: res.data.from, subject: res.data.subject, content: res.data.textBody || res.data.htmlBody || '' };
+// ── temporary-gmail (repli) ───────────────────────────────────────────────────
+async function createGmailTemp() {
+    const res = await axios.post(
+        `https://${GMAIL_HOST}/GmailGetAccount`,
+        { generateNewAccount: 1 },
+        {
+            headers: {
+                'Content-Type': 'application/json',
+                'x-rapidapi-host': GMAIL_HOST,
+                'x-rapidapi-key': RAPID_KEY
+            },
+            timeout: 15000
+        }
+    );
+    const email = res.data?.email || res.data?.gmail || res.data?.data?.email;
+    const token = res.data?.token || res.data?.id || email;
+    if (!email) throw new Error('temporary-gmail : création échouée');
+    return { provider: 'gmail', email, token, createdAt: Date.now() };
 }
 
-// ── Wrapper commun (essaie mail.tm, bascule sur 1secmail si ça échoue) ──────
+async function getMessagesGmail(s) {
+    const res = await axios.post(
+        `https://${GMAIL_HOST}/GmailGetMessages`,
+        { email: s.token },
+        {
+            headers: {
+                'Content-Type': 'application/json',
+                'x-rapidapi-host': GMAIL_HOST,
+                'x-rapidapi-key': RAPID_KEY
+            },
+            timeout: 15000
+        }
+    );
+    const msgs = res.data?.messages || res.data?.data || res.data || [];
+    return msgs.map(m => ({
+        id:      m.id || m._id,
+        from:    m.from?.address || m.from || m.sender || 'Inconnu',
+        subject: m.subject || m.title || 'Sans objet'
+    }));
+}
+
+async function getMessageContentGmail(s, id) {
+    // Gmail temporaire ne supporte pas la lecture par ID en général
+    // On renvoie un message générique
+    return {
+        from:    'N/A',
+        subject: 'N/A',
+        content: 'Lecture détaillée non disponible pour Gmail temporaire. Utilise /mail inbox pour voir les messages.'
+    };
+}
+
+// ── Wrapper commun (essaie temp-mail44, bascule sur Gmail si ça échoue) ──────
 async function createTempEmail() {
     try {
-        return await createMailTm();
+        return await createTempMail44();
     } catch (err) {
-        console.error('mail.tm indisponible, repli sur 1secmail :', err.response?.data || err.message);
-        return await createSecmail();
+        console.error('temp-mail44 indisponible, repli sur Gmail :', err.response?.data || err.message);
+        return await createGmailTemp();
     }
 }
 async function getMessages(s) {
-    return s.provider === 'secmail' ? getMessagesSecmail(s) : getMessagesMailTm(s);
+    return s.provider === 'gmail' ? getMessagesGmail(s) : getMessagesTempMail44(s);
 }
 async function getMessageContent(s, id) {
-    return s.provider === 'secmail' ? getMessageContentSecmail(s, id) : getMessageContentMailTm(s, id);
+    return s.provider === 'gmail' ? getMessageContentGmail(s, id) : getMessageContentTempMail44(s, id);
 }
 
 export default {
