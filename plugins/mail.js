@@ -4,7 +4,10 @@ import axios from 'axios';
 import { redis } from '../lib/redis.js';
 
 const RAPID_KEY  = '25222978fdmshe6b4366767fb8e6p18086bjsnee54a88ff976';
-const GMAIL_HOST = 'temporary-gmail-account.p.rapidapi.com';
+const MAIL_HOST  = 'temp-mail-api3.p.rapidapi.com';
+
+// Préférences par défaut pour la génération d'identité — ajustables si besoin
+const IDENTITY_DEFAULTS = { gender: 'male', nameset: 'en_US', countryKey: 'en_US' };
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000; // 1 semaine en ms
 const WEEK_S  = 7 * 24 * 60 * 60;         // 1 semaine en secondes (pour redis)
@@ -33,39 +36,74 @@ function extractMainCode(text) {
     return null;
 }
 
-// ── temporary-gmail ───────────────────────────────────────────────────────────
-async function createGmailTemp() {
-    const res = await axios.post(
-        `https://${GMAIL_HOST}/GmailGetAccount`,
-        { generateNewAccount: 1 },
-        {
-            headers: {
-                'Content-Type': 'application/json',
-                'x-rapidapi-host': GMAIL_HOST,
-                'x-rapidapi-key': RAPID_KEY
-            },
+// ── temp-mail-api3 (customIdentity) ─────────────────────────────────────────
+function rapidHeaders() {
+    return {
+        'Content-Type': 'application/json',
+        'x-rapidapi-host': MAIL_HOST,
+        'x-rapidapi-key': RAPID_KEY
+    };
+}
+
+// Traduit les erreurs RapidAPI courantes en messages compréhensibles
+function explainRapidError(err) {
+    const status = err.response?.status;
+    if (status === 429) return 'Quota RapidAPI dépassé pour ce mois — réessaie plus tard ou change de clé.';
+    if (status === 403) return 'Clé RapidAPI invalide ou non abonnée à ce endpoint.';
+    if (status === 404) return 'Endpoint introuvable (vérifie l\'URL de l\'API).';
+    if (err.code === 'ECONNABORTED') return 'Timeout — l\'API n\'a pas répondu à temps.';
+    return err.response?.data ? JSON.stringify(err.response.data).substring(0, 150) : err.message;
+}
+
+async function createGmailTemp(opts = {}) {
+    let res;
+    try {
+        res = await axios.get(`https://${MAIL_HOST}/customIdentity`, {
+            params: { ...IDENTITY_DEFAULTS, ...opts },
+            headers: rapidHeaders(),
             timeout: 15000
-        }
-    );
-    const email = res.data?.address || res.data?.email || res.data?.gmail || res.data?.data?.email || res.data?.data?.address;
-    const token = res.data?.token || res.data?.id || email;
-    if (!email) throw new Error('temporary-gmail : création échouée — ' + JSON.stringify(res.data).substring(0, 100));
-    return { provider: 'gmail', email, token, createdAt: Date.now() };
+        });
+    } catch (err) {
+        throw new Error(explainRapidError(err));
+    }
+
+    const data = res.data?.data || res.data?.result || res.data || {};
+    // La forme exacte de la réponse n'est pas documentée publiquement —
+    // on tente plusieurs clés plausibles pour rester robuste
+    const email =
+        data.email || data.mail || data.emailAddress ||
+        data.identity?.email || data.account?.email;
+    const name =
+        data.name || data.fullName ||
+        [data.firstName, data.lastName].filter(Boolean).join(' ') || null;
+
+    if (!email) {
+        throw new Error(
+            'temp-mail-api3 : email introuvable dans la réponse — ' +
+            JSON.stringify(res.data).substring(0, 200) +
+            '. Vérifie le nom exact du champ et ajuste createGmailTemp().'
+        );
+    }
+    // token = identifiant utilisé pour interroger la boîte de réception.
+    // À adapter dès que l'endpoint "messages" de temp-mail-api3 est confirmé.
+    const token = data.token || data.id || data.inboxId || email;
+    return { provider: 'temp-mail-api3', email, name, token, createdAt: Date.now() };
 }
 
 async function getMessagesGmail(s) {
-    const res = await axios.post(
-        `https://${GMAIL_HOST}/GmailGetMessages`,
-        { email: s.token },
-        {
-            headers: {
-                'Content-Type': 'application/json',
-                'x-rapidapi-host': GMAIL_HOST,
-                'x-rapidapi-key': RAPID_KEY
-            },
+    // ⚠️ Endpoint de lecture des messages non fourni pour temp-mail-api3.
+    // Placeholder raisonnable en supposant un GET /messages?email=... —
+    // à corriger avec le vrai endpoint dès qu'il est connu.
+    let res;
+    try {
+        res = await axios.get(`https://${MAIL_HOST}/messages`, {
+            params: { email: s.token },
+            headers: rapidHeaders(),
             timeout: 15000
-        }
-    );
+        });
+    } catch (err) {
+        throw new Error(explainRapidError(err));
+    }
     const msgs = res.data?.messages || res.data?.data || res.data || [];
     if (!Array.isArray(msgs)) return [];
     return msgs.map(m => ({
@@ -77,7 +115,6 @@ async function getMessagesGmail(s) {
 }
 
 async function getMessageContentGmail(s, id) {
-    // Récupère depuis la liste déjà chargée (Gmail ne permet pas toujours la lecture par ID)
     const msgs = await getMessagesGmail(s);
     const msg  = msgs.find(m => String(m.id) === String(id)) || msgs[0];
     if (!msg) return { from: 'N/A', subject: 'N/A', content: 'Message introuvable.' };
@@ -102,8 +139,8 @@ export default {
 
         if (!sub || sub === 'help') {
             return ctx.reply(
-                `📧 *Email temporaire Gmail*\n\n` +
-                `/mail gen — créer une adresse Gmail (valide 7 jours)\n` +
+                `📧 *Email temporaire*\n\n` +
+                `/mail gen — créer une adresse temporaire (valide 7 jours)\n` +
                 `/mail inbox — voir les messages reçus\n` +
                 `/mail read [numéro] — lire un message\n` +
                 `/mail delete — supprimer l'adresse`,
@@ -125,12 +162,12 @@ export default {
                 const data = await createGmailTemp();
                 await saveSession(userId, data);
                 await ctx.reply(
-                    `✅ *Gmail créé !*\n\n📧 \`${data.email}\`\n⏳ Durée : *7 jours*\n\n` +
+                    `✅ *Email créé !*\n\n📧 \`${data.email}\`\n⏳ Durée : *7 jours*\n\n` +
                     `Commandes : /mail inbox — /mail read 1`,
                     { parse_mode: 'Markdown' }
                 );
             } catch (err) {
-                console.error('Erreur création Gmail:', err.response?.data || err.message);
+                console.error('Erreur création email:', err.message);
                 await ctx.reply(`❌ Erreur : ${err.message}`);
             }
             return;
