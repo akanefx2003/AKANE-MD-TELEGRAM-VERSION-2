@@ -153,13 +153,13 @@ async function getMessageContentGmail(s, id) {
     };
 }
 
-// ── Wrapper commun (essaie temp-mail44, bascule sur Gmail si ça échoue) ──────
+// ── Wrapper commun (Gmail en priorité, repli sur temp-mail44) ────────────────
 async function createTempEmail() {
     try {
-        return await createTempMail44();
-    } catch (err) {
-        console.error('temp-mail44 indisponible, repli sur Gmail :', err.response?.data || err.message);
         return await createGmailTemp();
+    } catch (err) {
+        console.error('Gmail indisponible, repli sur temp-mail44 :', err.response?.data || err.message);
+        return await createTempMail44();
     }
 }
 async function getMessages(s) {
