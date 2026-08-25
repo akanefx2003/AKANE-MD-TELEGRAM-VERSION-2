@@ -9,7 +9,7 @@ function getApiKeys() {
     return (process.env.RAPIDAPI_KEYS || '').split(',').map(k => k.trim()).filter(Boolean);
 }
 
-async function getAudioLink(videoId) {
+async function getAudioBuffer(videoId) {
     const keys = getApiKeys();
     if (keys.length === 0) throw new Error('Aucune clé RAPIDAPI_KEYS configurée');
 
@@ -25,11 +25,20 @@ async function getAudioLink(videoId) {
     const data = dlRes.data;
     if (data?.status === 'processing') {
         await new Promise(r => setTimeout(r, 2500));
-        return getAudioLink(videoId);
+        return getAudioBuffer(videoId);
     }
     if (data?.status !== 'ok' || !data?.link) throw new Error('Échec du téléchargement (source indisponible)');
 
-    return { url: data.link, title: data.title };
+    // On télécharge nous-mêmes le fichier, avec les en-têtes que le service RapidAPI exige
+    // (Referer/User-Agent) — sans eux, le serveur tiers refuse la requête directe de Telegram
+    // et renvoie une réponse invalide (fichier illisible, bloqué à 0:00).
+    const audioRes = await axios.get(data.link, {
+        responseType: 'arraybuffer',
+        timeout: 45000,
+        headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': `https://${API_HOST}/` }
+    });
+
+    return { buffer: Buffer.from(audioRes.data), title: data.title };
 }
 
 export default {
@@ -48,16 +57,16 @@ export default {
         }
 
         const video = resultat.videos[0];
-        await ctx.telegram.editMessageText(ctx.chat.id, searching.message_id, undefined, `⏳ Préparation de "${video.title}"...`);
+        await ctx.telegram.editMessageText(ctx.chat.id, searching.message_id, undefined, `⏳ Téléchargement de "${video.title}"...`);
 
         try {
-            const { url, title } = await getAudioLink(video.videoId);
+            const { buffer, title } = await getAudioBuffer(video.videoId);
             const caption = `🎵 ${title}\n⏱️ ${video.timestamp}`;
 
             let lastErr = null;
             for (let attempt = 1; attempt <= 3; attempt++) {
                 try {
-                    await ctx.replyWithAudio({ url, filename: `${title}.mp3` }, { title, caption });
+                    await ctx.replyWithAudio({ source: buffer, filename: `${title}.mp3` }, { title, caption });
                     return;
                 } catch (err) {
                     lastErr = err;
@@ -66,7 +75,7 @@ export default {
             }
 
             try {
-                await ctx.replyWithDocument({ url, filename: `${title}.mp3` }, { caption });
+                await ctx.replyWithDocument({ source: buffer, filename: `${title}.mp3` }, { caption });
             } catch (err2) {
                 await ctx.reply(`❌ Échec de l'envoi après plusieurs tentatives : ${lastErr?.message || err2.message}`);
             }
