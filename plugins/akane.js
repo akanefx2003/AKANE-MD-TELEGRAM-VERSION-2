@@ -1,72 +1,121 @@
-// plugins/anime.js
+// plugins/akane.js
 import axios from 'axios';
 
-const API_URL = 'https://christus-api.vercel.app/anime/anime';
-const TRANSLATE_API = 'https://translate.googleapis.com/translate_a/single';
+const waitingMessages = [
+    "😒 Patiente...", "🙄 T'es pressé ?", "😤 J'ai pas que ça à faire...",
+    "🤨 T'es sérieux ?", "😏 Ok, mais dépêche-toi...", "😴 ZZZ... Ah t'es là ?"
+];
 
-async function translateToFrench(text) {
-    if (!text || text.length < 5) return text;
+const userHistories = new Map();
+let currentApiIndex = 0;
+
+const stablediffusionAPIs = [
+    { name: 'sd-fr-1', url: 'https://stablediffusion.fr/gpt4/predict2', referer: 'https://stablediffusion.fr/chatgpt4' },
+    { name: 'sd-fr-2', url: 'https://stablediffusion.fr/gpt4/predict', referer: 'https://stablediffusion.fr/chatgpt4' },
+    { name: 'sd-fr-3', url: 'https://stablediffusion.fr/gpt3/predict2', referer: 'https://stablediffusion.fr/chatgpt3' },
+    { name: 'sd-fr-4', url: 'https://stablediffusion.fr/gpt3/predict', referer: 'https://stablediffusion.fr/chatgpt3' }
+];
+const backupAPIs = [
+    { name: 'blackbox', url: 'https://www.blackbox.ai/api/chat',
+      body: p => ({ messages: [{ role: 'user', content: p }], model: 'llama-3.1-8b' }),
+      extract: d => typeof d === 'string' && d.length > 10 ? d : null }
+];
+
+async function callStableDiffusion(prompt, api) {
     try {
-        const response = await axios.get(TRANSLATE_API, {
-            params: { client: 'gtx', sl: 'auto', tl: 'fr', dt: 't', q: text },
-            timeout: 10000
+        const refererResp = await axios.get(api.referer, { timeout: 8000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const setCookie = refererResp.headers?.['set-cookie'];
+        const cookieHeader = Array.isArray(setCookie) ? setCookie.join('; ') : undefined;
+
+        const { data } = await axios.post(api.url, { prompt }, {
+            headers: {
+                accept: '*/*', 'content-type': 'application/json', origin: 'https://stablediffusion.fr',
+                referer: api.referer, ...(cookieHeader ? { cookie: cookieHeader } : {}), 'user-agent': 'Mozilla/5.0'
+            },
+            timeout: 25000
         });
-        if (response.data && response.data[0]) {
-            return response.data[0].map(seg => seg[0] || '').join('') || text;
-        }
-        return text;
+        if (data?.message?.length > 5) return data.message;
+        return null;
     } catch {
-        return text;
+        return null;
     }
 }
 
-const genreFr = {
-    'Action': 'Action', 'Adventure': 'Aventure', 'Fantasy': 'Fantastique', 'Comedy': 'Comédie',
-    'Drama': 'Drame', 'Romance': 'Romance', 'Sci-Fi': 'Science-Fiction', 'Slice of Life': 'Tranche de vie',
-    'Mystery': 'Mystère', 'Horror': 'Horreur', 'Thriller': 'Thriller', 'Supernatural': 'Surnaturel',
-    'Psychological': 'Psychologique', 'Sports': 'Sport', 'Music': 'Musique', 'Historical': 'Historique',
-    'Martial Arts': 'Arts martiaux', 'Mecha': 'Mecha'
-};
-const typeFr = { 'TV': 'Série TV', 'Movie': 'Film', 'OVA': 'OVA', 'ONA': 'ONA', 'Special': 'Spécial' };
-const statusFr = { 'Finished Airing': 'Terminé', 'Currently Airing': 'En cours', 'Not yet aired': 'Pas encore diffusé' };
+async function callBackupAPI(prompt, api) {
+    try {
+        const response = await axios.post(api.url, api.body(prompt), { timeout: 20000, headers: { 'Content-Type': 'application/json' } });
+        const reply = api.extract(response.data);
+        return (reply && reply.length > 10 && !reply.includes('<html>')) ? reply : null;
+    } catch {
+        return null;
+    }
+}
+
+async function callAkaneGPT(prompt) {
+    let attempts = 0;
+    const maxAttempts = stablediffusionAPIs.length + backupAPIs.length;
+    while (attempts < maxAttempts) {
+        const sdApi = stablediffusionAPIs[currentApiIndex % stablediffusionAPIs.length];
+        currentApiIndex++;
+        let reply = await callStableDiffusion(prompt, sdApi);
+        if (reply && !reply.includes('<html>')) return reply;
+        attempts++;
+        if (attempts >= stablediffusionAPIs.length) {
+            for (const backup of backupAPIs) {
+                reply = await callBackupAPI(prompt, backup);
+                if (reply) return reply;
+                attempts++;
+            }
+        }
+    }
+    throw new Error('Toutes les API sont indisponibles');
+}
 
 export default {
-    name: 'anime',
-    description: 'Rechercher un anime — /anime [titre]',
-    commands: ['anime'],
-    async handler(bot, ctx, args) {
+    name: 'akane',
+    description: 'Discuter avec Akane, IA sarcastique — /akane [question]',
+    commands: ['akane', 'akanehistory', 'akanereset'],
+    async handler(bot, ctx, args, { cmd }) {
+        const userId = ctx.from.id;
+
+        if (cmd === 'akanereset') {
+            userHistories.delete(userId);
+            return ctx.reply('✅ Historique Akane réinitialisé !');
+        }
+
+        if (cmd === 'akanehistory') {
+            const h = userHistories.get(userId);
+            if (!h?.messages.length) return ctx.reply('ℹ️ Aucun historique pour l\'instant.');
+            const lines = h.messages.map(m => `${m.role === 'user' ? '👤' : '🍒'} ${m.content.slice(0, 60)}`);
+            return ctx.reply(`📜 *Historique (${h.messages.length} messages)*\n\n${lines.join('\n')}`, { parse_mode: 'Markdown' });
+        }
+
         const query = args.join(' ').trim();
-        if (!query) return ctx.reply('❓ Utilisation : /anime [nom de l\'anime]\nExemple : /anime Naruto');
+        if (!query) return ctx.reply('❓ Utilisation : /akane [ta question]\nExemple : /akane fais-moi une blague');
+
+        await ctx.reply(waitingMessages[Math.floor(Math.random() * waitingMessages.length)]);
+
+        let history = userHistories.get(userId) || { messages: [] };
+        history.messages.push({ role: 'user', content: query });
+        if (history.messages.length > 10) history.messages = history.messages.slice(-10);
+
+        let prompt = '';
+        for (const m of history.messages.slice(0, -1)) {
+            prompt += `${m.role === 'user' ? 'Utilisateur' : 'Akane'}: ${m.content}\n`;
+        }
+        prompt += `Utilisateur: ${query}\nAkane: Tu es Akane, une IA insolente et sarcastique. Réponds de manière cinglante, avec humour noir, en 3-4 lignes max, en français.`;
 
         try {
-            const res = await axios.get(API_URL, { params: { q: query, limit: 1, sfw: true }, timeout: 15000 });
-            const results = res.data?.status === true ? res.data.results : [];
-            if (!results?.length) return ctx.reply(`❌ Aucun anime trouvé pour "${query}"`);
+            let reply = await callAkaneGPT(prompt);
+            reply = reply.replace(/<[^>]*>/g, '').replace(/&[a-z]+;/g, '').replace(/\n+/g, '\n').trim();
+            if (reply.length > 500) reply = reply.slice(0, 497) + '...';
 
-            const anime = results[0];
-            let synopsis = (anime.synopsis || 'Synopsis non disponible.').replace(/\[.*?\]/g, '').trim();
-            synopsis = await translateToFrench(synopsis);
-            if (synopsis.length > 900) synopsis = synopsis.slice(0, 900) + '...';
+            history.messages.push({ role: 'assistant', content: reply });
+            userHistories.set(userId, history);
 
-            const genres = (anime.genres || []).map(g => genreFr[g] || g).join(', ') || 'Non disponible';
-            const caption =
-                `🎬 *${anime.title}*\n\n` +
-                `🌐 Type : ${typeFr[anime.type] || anime.type || 'Inconnu'}\n` +
-                `📺 Épisodes : ${anime.episodes || '?'}\n` +
-                `📅 Année : ${anime.year || '???'}\n` +
-                `⭐ Note : ${anime.score || '?'}/10\n` +
-                `📊 Statut : ${statusFr[anime.status] || anime.status || 'Inconnu'}\n` +
-                `🏷️ Genres : ${genres}\n\n` +
-                `📖 ${synopsis}`;
-
-            if (anime.image) {
-                await ctx.replyWithPhoto({ url: anime.image }, { caption });
-            } else {
-                await ctx.reply(caption);
-            }
+            await ctx.reply(`🍒 ${reply}`);
         } catch (err) {
-            console.error('Erreur anime:', err.message);
-            await ctx.reply('❌ Erreur lors de la recherche, réessaie plus tard.');
+            await ctx.reply('❌ API indisponible, réessaie plus tard.');
         }
     }
 };
