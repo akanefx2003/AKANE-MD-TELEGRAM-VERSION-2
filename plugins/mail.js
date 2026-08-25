@@ -34,13 +34,14 @@ function extractMainCode(text) {
 }
 
 async function createTempEmail() {
-    const domainRes = await axios.get(`${API_BASE}/domains`);
-    const domain = domainRes.data['hydra:member'][0].domain;
+    const domainRes = await axios.get(`${API_BASE}/domains`, { timeout: 10000 });
+    const domain = domainRes.data['hydra:member']?.[0]?.domain;
+    if (!domain) throw new Error('Aucun domaine disponible côté mail.tm');
     const randomName = Math.random().toString(36).substring(2, 12);
     const email = `${randomName}@${domain}`;
     const password = Math.random().toString(36).substring(2, 15);
-    const res = await axios.post(`${API_BASE}/accounts`, { address: email, password });
-    if (!res.data?.id) throw new Error('Création échouée');
+    const res = await axios.post(`${API_BASE}/accounts`, { address: email, password }, { timeout: 10000 });
+    if (!res.data?.id) throw new Error('Création échouée (réponse mail.tm invalide)');
     return { email, password, createdAt: Date.now() };
 }
 
@@ -98,7 +99,8 @@ export default {
                     { parse_mode: 'Markdown' }
                 );
             } catch (err) {
-                await ctx.reply('❌ Erreur lors de la création.');
+                console.error('Erreur création mail:', err.response?.data || err.message);
+                await ctx.reply(`❌ Erreur lors de la création : ${err.response?.data?.detail || err.message}`);
             }
             return;
         }
