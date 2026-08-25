@@ -45,9 +45,12 @@ async function createTempMail44() {
             timeout: 15000
         }
     );
+    console.log('[TempMail44 create]', JSON.stringify(res.data).substring(0, 300));
+    // L'API retourne { email: "xxx@..." } — on utilise l'email comme identifiant dans les URLs
     const email = res.data?.email || res.data?.data?.email;
-    const token = res.data?.token || res.data?.data?.token || email;
-    if (!email) throw new Error('temp-mail44 : création échouée');
+    if (!email) throw new Error('temp-mail44 : création échouée — ' + JSON.stringify(res.data).substring(0, 100));
+    // token = email encodé pour l'URL
+    const token = encodeURIComponent(email);
     return { provider: 'tempmail44', email, token, createdAt: Date.now() };
 }
 
@@ -62,11 +65,13 @@ async function getMessagesTempMail44(s) {
             timeout: 15000
         }
     );
-    const msgs = res.data?.data || res.data || [];
-    msgs.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    console.log('[TempMail44 inbox]', JSON.stringify(res.data).substring(0, 300));
+    const msgs = res.data?.data || res.data?.messages || res.data || [];
+    if (!Array.isArray(msgs)) return [];
+    msgs.sort((a, b) => new Date(b.createdAt || b.date || 0) - new Date(a.createdAt || a.date || 0));
     return msgs.map(m => ({
-        id:      m.id || m._id,
-        from:    m.from?.address || m.from || m.sender,
+        id:      m.id || m._id || m.messageId,
+        from:    m.from?.address || m.from || m.sender || 'Inconnu',
         subject: m.subject || m.title || 'Sans objet'
     }));
 }
