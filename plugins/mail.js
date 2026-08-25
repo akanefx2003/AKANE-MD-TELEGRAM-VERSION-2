@@ -47,7 +47,7 @@ async function createGmailTemp() {
             timeout: 15000
         }
     );
-    const email = res.data?.email || res.data?.gmail || res.data?.data?.email;
+    const email = res.data?.address || res.data?.email || res.data?.gmail || res.data?.data?.email || res.data?.data?.address;
     const token = res.data?.token || res.data?.id || email;
     if (!email) throw new Error('temporary-gmail : création échouée — ' + JSON.stringify(res.data).substring(0, 100));
     return { provider: 'gmail', email, token, createdAt: Date.now() };
