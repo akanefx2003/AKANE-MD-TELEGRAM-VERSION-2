@@ -1,6 +1,11 @@
 // plugins/mail.js
 // Deux fournisseurs : temp-mail44 en priorité, repli automatique sur temporary-gmail
 import axios from 'axios';
+import crypto from 'crypto';
+
+function md5(str) {
+    return crypto.createHash('md5').update(str).digest('hex');
+}
 import { redis } from '../lib/redis.js';
 
 const RAPID_KEY      = '25222978fdmshe6b4366767fb8e6p18086bjsnee54a88ff976';
@@ -46,12 +51,11 @@ async function createTempMail44() {
         }
     );
     console.log('[TempMail44 create]', JSON.stringify(res.data).substring(0, 300));
-    // L'API retourne { email: "xxx@..." } — on utilise l'email comme identifiant dans les URLs
     const email = res.data?.email || res.data?.data?.email;
     if (!email) throw new Error('temp-mail44 : création échouée — ' + JSON.stringify(res.data).substring(0, 100));
-    // token = email encodé pour l'URL
-    const token = encodeURIComponent(email);
-    return { provider: 'tempmail44', email, token, createdAt: Date.now() };
+    // L'API temp-mail44 utilise le MD5 de l'email dans l'URL des messages
+    const emailHash = md5(email);
+    return { provider: 'tempmail44', email, token: emailHash, createdAt: Date.now() };
 }
 
 async function getMessagesTempMail44(s) {
