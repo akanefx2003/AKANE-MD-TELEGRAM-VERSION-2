@@ -40,6 +40,14 @@ async function getDomain() {
     return domain;
 }
 
+function formatApiError(err) {
+    const d = err.response?.data;
+    if (!d) return err.message;
+    const detail = d.detail || d['hydra:description'] || d.message
+        || (Array.isArray(d.violations) ? d.violations.map(v => v.message).join(', ') : null);
+    return detail || JSON.stringify(d).substring(0, 200);
+}
+
 function extractMainCode(text) {
     const otpMatches = text.match(/\b\d{4,8}\b/g) || [];
     if (otpMatches.length > 0 && !otpMatches[0].startsWith('20') && !otpMatches[0].startsWith('19')) {
@@ -52,16 +60,11 @@ function extractMainCode(text) {
 }
 
 // ── API mail.tm ──────────────────────────────────────────────────────────────
-async function createTempEmail() {
-    const domain = await getDomain();
+async function createAccountWithDomain(domain) {
     const randomName = Math.random().toString(36).substring(2, 12);
     const email    = `${randomName}@${domain}`;
     const password = Math.random().toString(36).substring(2, 15);
 
-    // Création du compte + récupération du token en parallèle dès que possible :
-    // le token nécessite le compte créé, donc on ne peut paralléliser que la requête
-    // de login juste après, mais on évite tout appel superflu (pas de vérif existante,
-    // le nom étant aléatoire il n'existera jamais déjà).
     const accountRes = await api.post('/accounts', { address: email, password });
     if (!accountRes.data?.id) throw new Error('Création du compte échouée');
 
@@ -70,6 +73,21 @@ async function createTempEmail() {
     if (!token) throw new Error('Récupération du token échouée');
 
     return { email, password, id: accountRes.data.id, token };
+}
+
+async function createTempEmail() {
+    const domain = await getDomain();
+    try {
+        return await createAccountWithDomain(domain);
+    } catch (e) {
+        // Le domaine en cache peut avoir été désactivé côté mail.tm entre-temps :
+        // on invalide le cache et on retente une seule fois avec un domaine tout frais
+        // avant d'abandonner, pour ne pas propager une erreur évitable à l'utilisateur.
+        console.error('Échec création avec domaine en cache, nouvelle tentative:', e.response?.data || e.message);
+        domainCache = { value: null, fetchedAt: 0 };
+        const freshDomain = await getDomain();
+        return await createAccountWithDomain(freshDomain);
+    }
 }
 
 async function getMessages(token) {
@@ -129,7 +147,7 @@ export default {
                 );
             } catch (err) {
                 console.error('Erreur création mail:', err.response?.data || err.message);
-                await ctx.reply(`❌ Erreur : ${err.response?.data?.detail || err.message}`);
+                await ctx.reply(`❌ Erreur : ${formatApiError(err)}`);
             }
             return;
         }
@@ -162,7 +180,7 @@ export default {
                 await ctx.reply(lines, { parse_mode: 'Markdown' });
             } catch (err) {
                 console.error('Erreur inbox mail:', err.response?.data || err.message);
-                await ctx.reply(`❌ Erreur de récupération : ${err.response?.data?.detail || err.message}`);
+                await ctx.reply(`❌ Erreur de récupération : ${formatApiError(err)}`);
             }
             return;
         }
@@ -200,7 +218,7 @@ export default {
                 await ctx.reply(text, { parse_mode: 'Markdown' });
             } catch (err) {
                 console.error('Erreur lecture mail:', err.response?.data || err.message);
-                await ctx.reply(`❌ Erreur de lecture : ${err.response?.data?.detail || err.message}`);
+                await ctx.reply(`❌ Erreur de lecture : ${formatApiError(err)}`);
             }
             return;
         }
